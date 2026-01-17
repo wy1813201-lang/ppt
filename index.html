@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>多模态视频审计系统</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    @media print {
+      .no-print {
+        display: none !important;
+      }
+      body {
+        background: white;
+      }
+      #reportPanel {
+        padding: 0;
+        box-shadow: none;
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+  <div class="no-print border-b border-slate-800 bg-slate-900/60 backdrop-blur p-4">
+    <h1 class="text-2xl font-semibold">实验视频自动审计系统</h1>
+    <p class="text-sm text-slate-400">基于 Gemini 2.5 Flash 的多模态审计闭环</p>
+  </div>
+
+  <main class="grid grid-cols-1 xl:grid-cols-[320px_1fr_360px] gap-6 p-6">
+    <section class="no-print space-y-6">
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-4 space-y-4">
+        <h2 class="text-lg font-semibold">控制台</h2>
+        <label class="block text-sm text-slate-300">Gemini API Key</label>
+        <input id="apiKey" type="password" placeholder="输入 API Key" class="w-full rounded-md bg-slate-950 border border-slate-700 px-3 py-2 text-sm" />
+        <div class="grid gap-2">
+          <label class="text-sm text-slate-300">参考视频（SOP）</label>
+          <input id="referenceUpload" type="file" accept="video/*" class="text-sm" />
+          <label class="text-sm text-slate-300">对照视频（待审计）</label>
+          <input id="targetUpload" type="file" accept="video/*" class="text-sm" />
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button id="startAuto" class="rounded-md bg-emerald-500/90 hover:bg-emerald-400 text-slate-950 px-3 py-2 text-sm font-semibold">开启 3 秒自动审计</button>
+          <button id="stopAuto" class="rounded-md bg-slate-800 hover:bg-slate-700 px-3 py-2 text-sm">停止审计</button>
+          <button id="manualAudit" class="rounded-md bg-indigo-500/90 hover:bg-indigo-400 text-slate-950 px-3 py-2 text-sm font-semibold">立即审计</button>
+        </div>
+        <div class="grid gap-2">
+          <label class="text-sm text-slate-300">语音阈值</label>
+          <input id="scoreThreshold" type="number" min="0" max="100" value="80" class="w-full rounded-md bg-slate-950 border border-slate-700 px-3 py-2 text-sm" />
+          <label class="text-sm text-slate-300">TTS 状态</label>
+          <p id="ttsStatus" class="text-xs text-slate-400">等待触发</p>
+        </div>
+      </div>
+
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-4 space-y-3">
+        <h3 class="text-sm font-semibold">系统状态</h3>
+        <div class="text-xs text-slate-400 space-y-1">
+          <p>自动审计：<span id="autoStatus">未开启</span></p>
+          <p>最后审计时间：<span id="lastAudit">尚未开始</span></p>
+          <p>累计审计：<span id="auditCount">0</span> 次</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="space-y-6">
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-4">
+        <h2 class="text-lg font-semibold mb-4">实时预览</h2>
+        <div class="grid md:grid-cols-2 gap-4">
+          <div>
+            <p class="text-sm text-slate-400 mb-2">参考视频 (Reference)</p>
+            <video id="referencePlayer" controls class="w-full rounded-lg border border-slate-800 bg-black"></video>
+          </div>
+          <div>
+            <p class="text-sm text-slate-400 mb-2">对照视频 (Target)</p>
+            <video id="targetPlayer" controls class="w-full rounded-lg border border-slate-800 bg-black"></video>
+          </div>
+        </div>
+        <canvas id="hiddenCanvas" class="hidden"></canvas>
+      </div>
+
+      <div id="reportPanel" class="bg-slate-900/70 border border-slate-800 rounded-xl p-4">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-semibold">审计报告</h2>
+          <button id="generateReport" class="no-print rounded-md bg-amber-400/90 hover:bg-amber-300 text-slate-900 px-3 py-1.5 text-sm font-semibold">生成报告</button>
+        </div>
+        <article id="reportOutput" class="prose prose-invert max-w-none text-sm"></article>
+      </div>
+    </section>
+
+    <section class="space-y-6">
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-4">
+        <h2 class="text-lg font-semibold mb-3">审计日志</h2>
+        <div class="space-y-3 text-xs text-slate-300" id="logOutput"></div>
+      </div>
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-4">
+        <h2 class="text-lg font-semibold mb-3">AI 返回结构</h2>
+        <pre id="jsonOutput" class="text-xs bg-slate-950 border border-slate-800 rounded-md p-3 overflow-auto"></pre>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      reference: [],
+      target: [],
+      autoTimer: null,
+      auditCount: 0,
+      lastAudit: null
+    };
+
+    const apiKeyInput = document.getElementById('apiKey');
+    const referenceUpload = document.getElementById('referenceUpload');
+    const targetUpload = document.getElementById('targetUpload');
+    const referencePlayer = document.getElementById('referencePlayer');
+    const targetPlayer = document.getElementById('targetPlayer');
+    const hiddenCanvas = document.getElementById('hiddenCanvas');
+    const logOutput = document.getElementById('logOutput');
+    const jsonOutput = document.getElementById('jsonOutput');
+    const autoStatus = document.getElementById('autoStatus');
+    const lastAudit = document.getElementById('lastAudit');
+    const auditCount = document.getElementById('auditCount');
+    const ttsStatus = document.getElementById('ttsStatus');
+    const scoreThreshold = document.getElementById('scoreThreshold');
+
+    function updateStatus() {
+      autoStatus.textContent = state.autoTimer ? '运行中' : '未开启';
+      lastAudit.textContent = state.lastAudit ? state.lastAudit.toLocaleTimeString() : '尚未开始';
+      auditCount.textContent = state.auditCount;
+    }
+
+    function appendLog(entry) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'border border-slate-800 rounded-md p-2 bg-slate-950/40';
+      wrapper.innerHTML = `
+        <p class="text-slate-400">${entry.timestamp}</p>
+        <p>Reference: <span class="text-emerald-300">${entry.referenceSummary}</span></p>
+        <p>Target: <span class="text-amber-300">${entry.targetSummary}</span></p>
+        <p>Score: <span class="text-indigo-300">${entry.score}</span> | Stay OK: ${entry.stayOk}</p>
+      `;
+      logOutput.prepend(wrapper);
+    }
+
+    function loadVideo(input, player) {
+      input.addEventListener('change', () => {
+        const file = input.files[0];
+        if (!file) return;
+        player.src = URL.createObjectURL(file);
+      });
+    }
+
+    loadVideo(referenceUpload, referencePlayer);
+    loadVideo(targetUpload, targetPlayer);
+
+    function captureFrame(player) {
+      if (player.readyState < 2) {
+        throw new Error('视频尚未准备好，请稍后再试。');
+      }
+      const width = player.videoWidth || 640;
+      const height = player.videoHeight || 360;
+      hiddenCanvas.width = width;
+      hiddenCanvas.height = height;
+      const context = hiddenCanvas.getContext('2d');
+      context.drawImage(player, 0, 0, width, height);
+      return hiddenCanvas.toDataURL('image/jpeg', 0.7).split(',')[1];
+    }
+
+    function extractJson(text) {
+      const firstBrace = text.indexOf('{');
+      const lastBrace = text.lastIndexOf('}');
+      if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+        throw new Error('Gemini 返回内容不包含可解析的 JSON。');
+      }
+      return text.slice(firstBrace, lastBrace + 1);
+    }
+
+    async function callGeminiVision(referenceFrame, targetFrame) {
+      const apiKey = apiKeyInput.value.trim();
+      if (!apiKey) {
+        throw new Error('请先输入 Gemini API Key');
+      }
+
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+      const prompt = `你是实验室视频审计助手。请分析参考视频与目标视频帧。返回 JSON:\n{\n  "referenceSummary": "...",\n  "targetSummary": "...",\n  "stayOk": true/false,\n  "score": 0-100,\n  "issues": ["..."]\n}`;
+
+      const body = {
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: prompt },
+              {
+                inlineData: {
+                  mimeType: 'image/jpeg',
+                  data: referenceFrame
+                }
+              },
+              {
+                inlineData: {
+                  mimeType: 'image/jpeg',
+                  data: targetFrame
+                }
+              }
+            ]
+          }
+        ]
+      };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+
+      if (!response.ok) {
+        throw new Error(`Gemini 请求失败: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) {
+        throw new Error('Gemini 未返回有效内容');
+      }
+
+      const jsonText = extractJson(text);
+      return JSON.parse(jsonText);
+    }
+
+    function pcmToWav(pcmData, sampleRate = 24000, numChannels = 1) {
+      const buffer = new ArrayBuffer(44 + pcmData.byteLength);
+      const view = new DataView(buffer);
+      const writeString = (offset, string) => {
+        for (let i = 0; i < string.length; i += 1) {
+          view.setUint8(offset + i, string.charCodeAt(i));
+        }
+      };
+      writeString(0, 'RIFF');
+      view.setUint32(4, 36 + pcmData.byteLength, true);
+      writeString(8, 'WAVE');
+      writeString(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, numChannels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * numChannels * 2, true);
+      view.setUint16(32, numChannels * 2, true);
+      view.setUint16(34, 16, true);
+      writeString(36, 'data');
+      view.setUint32(40, pcmData.byteLength, true);
+      new Uint8Array(buffer, 44).set(new Uint8Array(pcmData));
+      return buffer;
+    }
+
+    async function playTts(message) {
+      const apiKey = apiKeyInput.value.trim();
+      if (!apiKey) return;
+      ttsStatus.textContent = '生成语音中...';
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+      const body = {
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: message }]
+          }
+        ],
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          audioConfig: {
+            audioEncoding: 'LINEAR16',
+            sampleRateHertz: 24000
+          }
+        }
+      };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+
+      if (!response.ok) {
+        ttsStatus.textContent = `语音生成失败 (${response.status})`;
+        return;
+      }
+
+      const data = await response.json();
+      const audioBase64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (!audioBase64) {
+        ttsStatus.textContent = '语音数据缺失';
+        return;
+      }
+
+      const pcmBinary = Uint8Array.from(atob(audioBase64), (c) => c.charCodeAt(0));
+      const wavBuffer = pcmToWav(pcmBinary.buffer);
+      const audio = new Audio(URL.createObjectURL(new Blob([wavBuffer], { type: 'audio/wav' })));
+      await audio.play();
+      ttsStatus.textContent = '语音播放完成';
+    }
+
+    async function auditOnce() {
+      if (!referencePlayer.src || !targetPlayer.src) {
+        alert('请先加载参考与目标视频');
+        return;
+      }
+
+      try {
+        const referenceFrame = captureFrame(referencePlayer);
+        const targetFrame = captureFrame(targetPlayer);
+        const result = await callGeminiVision(referenceFrame, targetFrame);
+
+        const entry = {
+          ...result,
+          timestamp: new Date().toLocaleString()
+        };
+        state.reference.push({ timestamp: entry.timestamp, summary: result.referenceSummary });
+        state.target.push(entry);
+        state.auditCount += 1;
+        state.lastAudit = new Date();
+        updateStatus();
+        appendLog(entry);
+        jsonOutput.textContent = JSON.stringify(result, null, 2);
+
+        const threshold = Number(scoreThreshold.value || 0);
+        if (!result.stayOk || result.score < threshold) {
+          const issueText = result.issues?.join('；') || '存在异常操作，请立即检查。';
+          await playTts(`注意，当前操作存在异常。${issueText}`);
+        }
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
+    document.getElementById('manualAudit').addEventListener('click', auditOnce);
+
+    document.getElementById('startAuto').addEventListener('click', () => {
+      if (state.autoTimer) return;
+      state.autoTimer = setInterval(auditOnce, 3500);
+      updateStatus();
+    });
+
+    document.getElementById('stopAuto').addEventListener('click', () => {
+      if (state.autoTimer) {
+        clearInterval(state.autoTimer);
+        state.autoTimer = null;
+        updateStatus();
+      }
+    });
+
+    document.getElementById('generateReport').addEventListener('click', async () => {
+      const apiKey = apiKeyInput.value.trim();
+      if (!apiKey) {
+        alert('请先输入 Gemini API Key');
+        return;
+      }
+
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+      const prompt = `你是科研审计报告助手。请基于 JSON 序列生成结构化 Markdown 报告（包含表格、结论、建议）。JSON: ${JSON.stringify(state.target)}`;
+
+      const body = {
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: prompt }]
+          }
+        ]
+      };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+
+      if (!response.ok) {
+        alert(`报告生成失败: ${response.status}`);
+        return;
+      }
+
+      const data = await response.json();
+      const markdown = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      document.getElementById('reportOutput').innerHTML = marked.parse(markdown);
+    });
+
+    updateStatus();
+  </script>
+</body>
+</html>
